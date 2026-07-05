@@ -70,7 +70,7 @@ let bestCombo=Number(localStorage.getItem("neonPongBestCombo")||0),combo=0;
 let comboSaveTimer=0;
 
 const colours=["#00ffff","#ff00ff","#ffff00","#00ff77","#ff6600","#8a5cff"];
-const MAX_SPEED=22;
+const MAX_SPEED=22; // speed cap - prevents runaway velocity/NaN freeze
 let audioCtx=null,master=null,soundOK=false;
 
 function showScreen(s){
@@ -107,6 +107,7 @@ document.addEventListener("touchstart",unlockAudio,{passive:true});
 document.addEventListener("pointerdown",unlockAudio,{passive:true});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)unlockAudio();});
 
+// tone() now supports stereo panning (pan: -1 left .. 1 right) for positional audio
 function tone(f,d=0.05,type="sine",vol=0.12,delay=0,pan=0){
   unlockAudio();
   if(!audioCtx||!master)return;
@@ -143,6 +144,7 @@ function sPower(){tone(1100,.06,"sine",.11);tone(1450,.07,"triangle",.09,.06);to
 function sPowerSpawn(){tone(600,.05,"sine",.05);tone(900,.06,"sine",.05,.05);}
 function sClick(){tone(700,.035,"square",.08);}
 function sCombo(n){
+  // ascending arpeggio milestone chime every 5-combo
   const base=440+Math.min(n,40)*6;
   tone(base,.06,"triangle",.09);
   tone(base*1.26,.06,"triangle",.09,.05);
@@ -214,6 +216,7 @@ function clampBallSpeed(b){
 }
 function hitBall(b,p,isBottom){
   hitCount++;combo++;bestCombo=Math.max(bestCombo,combo);
+  // throttle localStorage writes - only persist when a new best is actually set, and at most a few times/sec
   const now=performance.now();
   if(combo>=bestCombo && now-comboSaveTimer>150){
     localStorage.setItem("neonPongBestCombo",bestCombo);
@@ -223,6 +226,8 @@ function hitBall(b,p,isBottom){
   b.vy=(isBottom?-Math.abs(b.vy):Math.abs(b.vy))*speedMul;
   b.vx+=(b.x-(p.x+p.w/2))*.047;
   clampBallSpeed(b);
+  // push the ball fully outside the paddle so it can't re-trigger a hit on the very next
+  // frame (this repeated re-triggering + exponential speed growth was the freeze cause)
   b.y=isBottom?p.y-b.r-1:p.y+p.h+b.r+1;
   const pan=(b.x/W)*2-1;
   sHit(pan, Math.min(combo,20)*4);
@@ -248,4 +253,81 @@ function update(t){
   if(flash>0)flash-=.035;
   for(const p of [topP,bottomP]){
     if(p.grow>0){p.grow--;if(p.grow===0)p.w=p.baseW;}
-    p.x+=(p.desiredX-p.x)*.30
+    p.x+=(p.desiredX-p.x)*.30;
+  }
+  if(!playing||over)return;
+  if(gameMode==="special"&&t-lastPower>5200){lastPower=t;addPower(t);}
+  for(const tr of trails)tr.life-=.045;
+  trails=trails.filter(tr=>tr.life>0);
+  for(const b of balls){
+    // NaN/Infinity guard - if physics ever produces a non-finite value, recover instead of
+    // letting it silently corrupt every frame after (this is what looked like a "freeze")
+    if(!isFinite(b.x)||!isFinite(b.y)||!isFinite(b.vx)||!isFinite(b.vy)){
+      b.x=W/2;b.y=H/2;b.vx=Math.random()*5-2.5;b.vy=(Math.random()>.5?1:-1)*6;
+    }
+    trails.push({x:b.x,y:b.y,r:b.r,life:1});
+    if(trails.length>200)trails.splice(0,trails.length-200);
+    b.x+=b.vx;b.y+=b.vy;
+    clampBallSpeed(b);
+    const pan=(b.x/W)*2-1;
+    if(b.x<b.r+18){b.x=b.r+18;b.vx=Math.abs(b.vx);sWall(pan);spawn(b.x,b.y,"#00ffff",8);}
+    else if(b.x>W-b.r-18){b.x=W-b.r-18;b.vx=-Math.abs(b.vx);sWall(pan);spawn(b.x,b.y,"#00ffff",8);}
+    if(collide(b,bottomP)&&b.vy>0)hitBall(b,bottomP,true);
+    if(collide(b,topP)&&b.vy<0)hitBall(b,topP,false);
+    for(let i=powerUps.length-1;i>=0;i--){
+      const p=powerUps[i],dx=b.x-p.x,dy=b.y-p.y;
+      if(Math.sqrt(dx*dx+dy*dy)<b.r+p.r){activatePower(p.kind,b.vy<0);powerUps.splice(i,1);}
+    }
+  }
+  balls=balls.filter(b=>b.y>-45&&b.y<H+45);
+  if(balls.length===0)resetBalls(Math.random()>.5?1:-1);
+  for(const b of balls){if(b.y<-28){score(true);break;}if(b.y>H+28){score(false);break;}}
+  if(players==="bot"){const target=(balls[0]?.x||W/2)-topP.w/2;topP.desiredX+=(target-topP.desiredX)*aiSpeed();}
+  clamp();
+}
+function drawBg(){
+  ctx.fillStyle="#050510";ctx.fillRect(0,0,W,H);
+  const m=14,g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,"#ff00ff");g.addColorStop(.45,"#8a5cff");g.addColorStop(1,"#00ffff");
+  ctx.strokeStyle=g;ctx.lineWidth=5;ctx.shadowBlur=18;ctx.shadowColor="#00ffff";ctx.strokeRect(m,m,W-m*2,H-m*2);ctx.shadowBlur=0;
+  for(let y=(bgOffset%42)-42;y<H;y+=42){ctx.strokeStyle="rgba(255,0,255,.06)";ctx.beginPath();ctx.moveTo(m,y);ctx.lineTo(W-m,y);ctx.stroke();}
+  for(let x=m;x<W-m;x+=42){ctx.strokeStyle="rgba(0,255,255,.045)";ctx.beginPath();ctx.moveTo(x,m);ctx.lineTo(x,H-m);ctx.stroke();}
+  ctx.strokeStyle="rgba(255,255,255,.5)";ctx.setLineDash([13,12]);ctx.beginPath();ctx.moveTo(m,H/2);ctx.lineTo(W-m,H/2);ctx.stroke();ctx.setLineDash([]);
+}
+function drawPaddle(p){
+  const pr=Math.min(1,(performance.now()-lastColour)/1250),c=mix(p.c,p.t,pr);
+  ctx.shadowBlur=28;ctx.shadowColor=c;ctx.fillStyle=c;ctx.fillRect(p.x,p.y,p.w,p.h);
+  ctx.fillStyle="rgba(255,255,255,.62)";ctx.fillRect(p.x+8,p.y+3,p.w-16,3);ctx.shadowBlur=0;
+}
+function draw(){
+  drawBg();
+  for(const tr of trails){const trLife=Math.max(0,tr.life);ctx.globalAlpha=trLife*.55;ctx.shadowBlur=24;ctx.shadowColor="#00aaff";ctx.fillStyle="#00aaff";ctx.beginPath();ctx.arc(tr.x,tr.y,Math.max(0,tr.r*(.3+trLife*.85)),0,Math.PI*2);ctx.fill();}
+  ctx.globalAlpha=1;ctx.shadowBlur=0;
+  for(const p of particles){ctx.globalAlpha=Math.max(0,p.life);ctx.shadowBlur=14;ctx.shadowColor=p.c;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y,Math.max(0,3.6*p.life),0,Math.PI*2);ctx.fill();}
+  ctx.globalAlpha=1;ctx.shadowBlur=0;
+  for(const p of powerUps){ctx.shadowBlur=22;ctx.shadowColor="#ffff00";ctx.fillStyle="#ffff00";ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;ctx.fillStyle="#050510";ctx.font="bold 8px Arial";ctx.textAlign="center";ctx.fillText(p.kind==="big"?"BIG":p.kind==="slow"?"SLOW":"MULTI",p.x,p.y+3);}
+  drawPaddle(topP);drawPaddle(bottomP);
+  for(const b of balls){ctx.shadowBlur=30;ctx.shadowColor="#fff";ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(b.x,b.y,Math.max(0,b.r),0,Math.PI*2);ctx.fill();}
+  ctx.shadowBlur=0;
+  ctx.textAlign="center";ctx.font="bold 42px Arial";ctx.shadowBlur=18;ctx.fillStyle="#fff";ctx.shadowColor="#fff";ctx.fillText(topScore+" : "+bottomScore,W/2,62);ctx.shadowBlur=0;
+  if(gameMode==="special"){ctx.font="bold 13px Arial";ctx.fillStyle="rgba(255,255,255,.85)";ctx.fillText("COMBO "+combo+"   BEST "+bestCombo,W/2,H-38);}
+  if(flash>0){ctx.globalAlpha=flash;ctx.fillStyle="#fff";ctx.fillRect(0,0,W,H);ctx.globalAlpha=1;}
+  if(over){ctx.fillStyle="rgba(0,0,0,.76)";ctx.fillRect(0,0,W,H);ctx.fillStyle="#fff";ctx.font="bold 32px Arial";ctx.shadowBlur=22;ctx.shadowColor="#00ffff";ctx.fillText(bottomScore>topScore?"PLAYER 1 WINS!":(players==="pvp"?"PLAYER 2 WINS!":"BOT WINS!"),W/2,H/2-12);ctx.font="20px Arial";ctx.fillText("Tap to return to menu",W/2,H/2+36);ctx.shadowBlur=0;}
+}
+const _origArc=ctx.arc.bind(ctx);
+ctx.arc=function(x,y,r,a0,a1,ccw){return _origArc(x,y,Math.max(0,r),a0,a1,ccw);};
+function loop(t){try{update(t);draw();}catch(e){console.log(e);playing=false;over=false;menu.style.display="flex";}requestAnimationFrame(loop);}
+canvas.addEventListener("touchmove",e=>{
+  e.preventDefault();unlockAudio();
+  const r=canvas.getBoundingClientRect();
+  for(const touch of e.touches){
+    const x=touch.clientX-r.left,y=touch.clientY-r.top;
+    if(y>H/2)bottomP.desiredX=x-bottomP.w/2;
+    else if(players==="pvp")topP.desiredX=x-topP.w/2;
+  }
+  clamp();
+},{passive:false});
+canvas.addEventListener("click",()=>{unlockAudio();if(over){sClick();playing=false;over=false;showScreen("players");menu.style.display="flex";}});
+resize();loop(0);
+</script>
+</body>
+</html>
